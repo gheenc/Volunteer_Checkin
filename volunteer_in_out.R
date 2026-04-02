@@ -6,6 +6,13 @@
 # Purpose: Clean and prepare dataset for format in master dataset
 # =============================================================================
 
+# 1. Packages
+# 2. Call in Data and Formatting
+# 3. Note about DOB and Phone numbers
+# 4. Phone Numbers
+# 5. Exploring Data
+# 6. Merge Datasets with Different Apporoaches (email+date, first+last+date, first+last+dob+date, dob+date)
+# 7. Examine Duplicates 
 
 # install packages
 # install.packages("readxl")
@@ -17,6 +24,7 @@ library(readxl)
 library(dplyr)
 library(lubridate)
 library(stringr)
+
 
 # read in data, telling each column desired structure
 data_in <- read_excel(
@@ -47,6 +55,14 @@ data_in <- data_in %>%
     phone       = `Cell Phone Number`,
     email_personal   = `Email (non-school email please)`
   )
+  
+data_in <- data_in %>%
+  mutate(
+    first_name = str_to_lower(str_trim(first_name)),
+    last_name = str_to_lower(str_trim(last_name)),
+    email = str_to_lower(str_trim(email)),
+    email_personal = str_to_lower(str_trim(email_personal))
+  )
 
 # read in check out data, telling each column desired structure
 data_out <- read_excel(
@@ -65,6 +81,8 @@ data_out <- read_excel(
 )
 # 3 DOB were out of range - default changed to NA
 
+## Some DOB were misstyped (ex: year is 0200 instead of 2000, assumably). Because there is a low amount, we could go back and manually correct each if needed. But as long as we don't match on date, we should be fine to leave as is. 
+
 # changes names to be in wanted format
 data_out <- data_out %>%
   rename(
@@ -76,6 +94,18 @@ data_out <- data_out %>%
     phone       = `Cell Phone Number`,
     department   = `Which department did you spend the majority of your time volunteering in today?`
   )
+  
+data_out <- data_out %>%
+  mutate(
+    first_name = str_to_lower(str_trim(first_name)),
+    last_name = str_to_lower(str_trim(last_name)),
+    email = str_to_lower(str_trim(email))
+  )  
+
+
+
+
+## The phone numbers are in the Excel correct, but they are not coming through correctly; we have enough defining features that we should not need the phone numbers, but if we want them to be perfect, we will need to go back and clean them further. Additionally will need to consider if displaying in dashboard. From comparing output to the spreadsheet, I believe it messes up a phone number the same way for all (Ex: Emma Singletary has a 0 added to the beginning and 1 added to the end of her phone number in all of her entries so her phone number ends up being wrong, but still consistently hers).
 
 # fix phone numbers coming in as scientific notation
 # strip all dashes and parentheses to leave only numbers 
@@ -86,60 +116,82 @@ data_in <- data_in %>%
 data_in %>% count(nchar(phone))
 data_in %>% filter(nchar(phone) == 13)
 
-
 # add back in the leading zeros
 df_in <- df_in %>%
   mutate(phone = as.character(as.numeric(phone))) %>%
   mutate(phone = ifelse(nchar(phone) == 9, paste0("0", phone), phone))
 
-names(data_out)
+
+
+
 # explore data (sign-in)
-dim(data_in) #3805 and 10 variables
-names(data_in) #time, email, first, last, dob, cell, email, verification, covid, mask
+dim(data_in) #3805 and 7 variables
 
 # explore data (sign-out)
-dim(data_out) #3701 and 9 variables - 100 people did not check out
-names(data_out) # time, email, first, last, dob, cell, verification, survey, department
+dim(data_out) #3701 and 9 variables - 104 people did not check out
 
-# drop unnecessary columns sign in 
-data_in <- data_in[, c("Timestamp", "Email Address", "First Name", "Last Name", "Date of Birth", "Cell Phone Number", "Email (non-school email please)")]
+# show unique values of each to determine how many different people used check in/out
+nrow(unique(data_in[c("first_name","last_name")])) #463 people 
+nrow(unique(data_out[c("first_name","last_name")])) #457 people
 
-# rename timestamp 
+
+
+# need to extract the date out of the timestamps so that they can match 
 data_in <- data_in %>%
-  rename(Timestamp_in = Timestamp)
+  mutate(date = as.Date(timestamp_in))
 
-# drop unnecessary columns sign out 
-data_out <- data_out[, c("Timestamp", "Email Address", "First Name", "Last Name", "Date of Birth", "Cell Phone Number")]
-
-# rename timestamp 
 data_out <- data_out %>%
-  rename(Timestamp_out = Timestamp)
+  mutate(date = as.Date(timestamp_out))
 
-# show unique values of each 
-nrow(unique(data_in[c("First Name","Last Name")])) #476 people 
-nrow(unique(data_out[c("First Name","Last Name")])) #476 people 
+# merge datasets together
+# Used left join so that people who checked in but not out, still remained in the merged dataset
+# Goal is for nrow(data_in) == nrow(merged). using data_in as basis so matching all instances; if there are extra rows, it is due to a many-many issue of the matching not being specific enough and R creating all possible combinations (Ex: john and sara both born on same date volunteer same date, R make 4 possible combinations)
 
-# handle cell phone numbers
+## I wanted to try two ways to compare approaches, but only 19 people have an email in sign in... is this true??
+sum(!is.na(data_in$email))
+sum(is.na(data_in$dob))
+nrow(data_in) #3805
 
-# pull each names to be together 
-checkin_sorted <- data_in %>% arrange("First Name", "Last Name")
+# merge based on same email and date
+merged_email <- data_in %>%
+  left_join(data_out, by = c("email", "date"))
+  
+# merge based on same first, last and date
+merged_name <- data_in %>%
+  left_join(data_out, by = c("first_name", "last_name", "date"))
+nrow(merged_name) # 3821
+  
+# merge based on same dob, first, last and date
+merged_name_dob <- data_in %>%
+  left_join(data_out, by = c("first_name", "last_name", "date", "dob"))
+nrow(merged_name_dob) # 3818 - only 13 extra, best so far
+  
+# merge based on same dob, and date
+merged_dob <- data_in %>%
+  left_join(data_out, by = c("date", "dob"))
+nrow(merged_dob) # 3894
+  
+## When we merge based on first and last name, there is a warning that some first+last+date combination appears multiple times. It could be people accidentally filling out the check in when they meant to scan the check out; people doing two shifts in one day; or people with the same name. 
 
-# how many people used the check in 
-nrow(unique(checkin_sorted)) #3805
 
-# pull each names to be together 
-checkout_sorted <- data_out %>% arrange("First Name", "Last Name")
+# find the duplicate in data_in
+data_in %>%
+  group_by(first_name, last_name, date) %>%
+  filter(n() > 1) %>%
+  arrange(last_name, first_name, date)
 
-# how many people used the check out 
-nrow(unique(checkout_sorted)) #3701 - less people, some forgot to check out
+# find the duplicate in data_out
+data_out %>%
+  group_by(first_name, last_name, date) %>%
+  filter(n() > 1) %>%
+  arrange(last_name, first_name, date)
+  
+# Finding the 13 extra rows from best model: first+last+date+dob
+merged_name_dob %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1) %>%
+  arrange(last_name, first_name, date) %>% View()
 
-# merge together based on first and last 
-merged <- merge(checkin_sorted, checkout_sorted, by = c("First Name", "Last Name"))
+## looking at the extra rows in merged based on name and dob, most are people submitting two check outs, a check in instead of a check out, etc. could be easily cleaned if we want to use this model by deleting duplicates, etc. 
 
-# when i merge, something is happening to timestamp
-str(data_in)
-str(checkin_sorted)
-merged$Timestamp.x <- as.POSIXct(merged$Timestamp.x, origin = "1970-01-01")
-
-# i need to fix dob, telephone
 
