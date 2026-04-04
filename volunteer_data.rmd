@@ -1,0 +1,555 @@
+---
+title: "volunteer_data"
+author: "Caroline Gheen"
+date: "2026-04-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+=============================================================================
+ Project: Manos Juntos STATCOM - Volunteer Check In/Out
+ Script: volunteer_in_out.R
+ Author: Caroline Gheen
+ Date: 2026-03-01
+ Purpose: Clean and prepare dataset for format in master dataset
+=============================================================================
+
+## 1. Packages
+## 2. Call in Data and Formatting
+## 3. Fix DOB
+## 4. Exploring Data
+## 5. Merge Datasets with Different Apporoaches (email+date, first+last+date, first+last+dob+date, dob+date)
+## 6. Examine Duplicates
+## 7. Phone Numbers
+## 8. Duration - Total Time Calculation
+## 9. Unique ID Assignment
+
+# Install Packages
+```{r}
+# install packages
+# install.packages("readxl")
+# install.packages("dplyr")
+# install.packages("lubridate", repos = "<https://cloud.r-project.org>")
+# install.packages("writexl")
+```
+
+# Call Packages
+```{r}
+library(readxl) 
+library(dplyr) 
+library(lubridate) 
+library(stringr)
+library(writexl)
+```
+
+# Call in Data and Format
+Read in data, telling each column desired structure
+```{r}
+data_in <- read_excel(
+  'Volunteer_Checkin_Data.xlsx', sheet = 'Sign-In',
+  col_types = c(
+    "date",    # Timestamp_in
+    "text",    # Email Address
+    "text",    # First Name
+    "text",    # Last Name
+    "date",    # Date of Birth
+    "text",    # Cell Phone Number
+    "text",    # Email (non-school...)
+    "skip",    # verification question
+    "skip",    # covid
+    "skip"     # mask
+  )
+)
+```
+6 DOBs were outside expected range - default changed these to be NA
+
+Changes names to be in wanted format
+```{r}
+data_in <- data_in %>%
+  rename(
+    timestamp_in   = `Timestamp`,
+    email       = `Email Address`,
+    first_name  = `First Name`,
+    last_name   = `Last Name`,
+    dob         = `Date of Birth`,
+    phone       = `Cell Phone Number`,
+    email_personal   = `Email (non-school email please)`
+  )
+```
+
+Trim and standardize all free text (first/last name, email)
+```{r}
+data_in <- data_in %>% 
+  mutate( 
+    first_name = str_to_lower(str_trim(first_name)), 
+    last_name = str_to_lower(str_trim(last_name)), 
+    email = str_to_lower(str_trim(email)), 
+    email_personal = str_to_lower(str_trim(email_personal)) 
+)
+```
+
+Read in check out data, telling each column desired structure
+```{r}
+data_out <- read_excel(
+  'Volunteer_Checkin_Data.xlsx', sheet = 'Sign-Out',
+  col_types = c(
+    "date",    # Timestamp
+    "text",    # Email Address
+    "text",    # First Name
+    "text",    # Last Name
+    "date",    # Date of Birth
+    "text",    # Cell Phone Number
+    "skip",    # verification question
+    "skip",    # optional
+    "text"     # department
+  )
+)
+```
+3 DOB were out of range - default changed to NA
+
+
+Changes names to be in wanted format out data
+```{r}
+data_out <- data_out %>%
+  rename(
+    timestamp_out   = `Timestamp`,
+    email       = `Email Address`,
+    first_name  = `First Name`,
+    last_name   = `Last Name`,
+    dob         = `Date of Birth`,
+    phone       = `Cell Phone Number`,
+    department   = `Which department did you spend the majority of your time volunteering in today?`
+  )
+```
+
+Trim and standardize all free text (first/last name, email)
+```{r}
+data_out <- data_out %>% 
+  mutate(first_name = str_to_lower(str_trim(first_name)), 
+  last_name = str_to_lower(str_trim(last_name)), 
+  email = str_to_lower(str_trim(email))
+)
+```
+
+# FIX DOB
+Some DOB were misstyped (ex: year is 0200 instead of 2000, assumably). Because there is a low amount, we could go back and manually correct each if needed. But as long as we don't match on dob, we should be fine to leave as is.
+
+Manually imput DOB
+```{r}
+data_in %>% slice(40, 941, 1298, 1380, 1738, 2306) %>% 
+  select(first_name, last_name, dob) # data in mistakes
+
+data_out %>% slice(16, 1280, 1281) %>% 
+  select(first_name, last_name, dob) # data out mistakes
+
+# manually fix in dob
+data_in <- data_in %>%
+  mutate(dob = case_when(
+    first_name == "cade" & last_name == "huston" ~ as.Date("1998-09-14"),
+    first_name == "paul" & last_name == "atiyeh" ~ as.Date("2004-06-01"),
+    first_name == "athman" & last_name == "rajaratnam" ~ as.Date("2001-02-20"),
+    first_name == "emily" & last_name == "nguyen" ~ as.Date("2000-09-13"),
+    first_name == "adrian" & last_name == "hernandez" ~ as.Date("2003-03-03"),
+    first_name == "megan" & last_name == "john" ~ as.Date("2003-10-21"),
+    TRUE ~ dob
+  ))
+
+# manually fix dob out
+data_out <- data_out %>%
+  mutate(dob = case_when(
+    first_name == "cade" & last_name == "huston" ~ as.Date("1998-09-14"),
+    first_name == "emily" & last_name == "nguyen" ~ as.Date("2000-09-13"),
+    first_name == "lena" & last_name == "do" ~ as.Date("1998-11-08"),
+    TRUE ~ dob
+  ))
+
+# check all dob present
+sum(is.na(data_in$dob)) #0
+sum(is.na(data_out$dob)) #0
+```
+
+
+# EXPLORE DATA 
+Explore data (sign-in and out
+```{r}
+dim(data_in) #3805 and 7 variables
+dim(data_out) #3701 and 7 variables - 104 people did not check out
+```
+
+Show unique values of each to determine how many different people used check in/out
+```{r}
+nrow(unique(data_in[c("first_name","last_name")])) #463 people
+nrow(unique(data_out[c("first_name","last_name")])) #457 people
+```
+
+Need to extract the date out of the timestamps so that they can match - if you try and match on timestamp outright there will be no matches as timestamp is very specific, down to the second
+```{r}
+data_in <- data_in %>% mutate(date = as.Date(timestamp_in))
+data_out <- data_out %>% mutate(date = as.Date(timestamp_out))
+```
+
+Is anyone missing time in/time out
+```{r}
+sum(is.na(data_out$timestamp_out)) # 0
+sum(is.na(data_in$timestamp_in)) # 0
+```
+
+
+# MERGING DATASETS TOGETHER 
+Merge datasets together
+Used left join so that people who checked in but not out, still remained in the merged dataset
+
+Goal is for nrow(data_in) == nrow(merged). using data_in as basis so matching all instances; if there are extra rows, it is due to a many-many issue of the matching not being specific enough and R creating all possible combinations (Ex: john and sara both born on same date volunteer same date, R make 4 possible combinations)
+*nrow(data_in) = 3805*
+*look at accidental duplication due to system*
+
+I wanted to try two ways to compare approaches, but only 19 people have an email in sign in... is this true??
+```{r}
+sum(!is.na(data_in$email)) # 19 people do have an email
+sum(is.na(data_in$dob))  # 6 people do not have a dob - default
+```
+
+Merge based on same email and date
+```{r}
+merged_email <- data_in %>% 
+left_join(data_out, by = c("email", "date"))
+```
+
+Merge based on same first, last and date
+```{r}
+merged_name <- data_in %>% 
+left_join(data_out, by = c("first_name","last_name", "date")) 
+nrow(merged_name) # 3821
+```
+
+Merge based on same dob, first, last and date
+*BEST SO FAR*
+```{r}
+merged_name_dob <- data_in %>% 
+left_join(data_out, by = c("first_name", "last_name", "date", "dob")) 
+nrow(data_in) # 3805
+nrow(merged_name_dob) #3818 -  13 extra, best so far
+sum(is.na(merged_name_dob$timestamp_out)) 
+anti_join(data_in, data_out, by = c("first_name", "last_name", "date", "dob")) %>% View()
+
+```
+
+Merge based on same dob, and date
+```{r}
+merged_dob <- data_in %>% 
+left_join(data_out, by = c("date", "dob"))
+nrow(merged_dob) # 3894
+```
+
+# EXAMINE AND CLEAN DUPLICATES 
+When we merge based on first and last name, there is a warning that some first+last+date combination appears multiple times. It could be people accidentally filling out the check in when they meant to scan the check out; people doing two shifts in one day; or people with the same name. Most likely the first one, but we shouldn't assume until we confirm
+
+If we look into the duplicate in and outs, we can manually decide and make decisions about where they are supposed to be
+*I am doing this one-by-one because we want a robust final product, but we could probably do a loop*
+*Would be good to make note of most likely reason for duplication and how many*
+*Common Reasons to Have Duplicates on Check In: check in twice; check in instead of out; check in and did not check out*
+*Common Reasons to Have Duplicates on Check Out: people thought they were checking out and stayed longer so they checked out twice; checked out instead of in at the beginning; forgot to check in but checked out*
+
+Find the duplicate in data_in
+*23 people accidentally checked in instead of out*
+```{r}
+duplicates_in <- data_in %>% 
+group_by(first_name, last_name, date) %>% 
+filter(n() > 1) %>% 
+arrange(last_name, first_name, date) %>% View()
+```
+
+For loop that filters through duplicates - if they have two check ins and a check out, delete the second check in. If they only have two check ins, move the second check in to check out
+```{r}
+# get unique duplicate people
+duplicates_in <- data_in %>% 
+  group_by(first_name, last_name, date, dob) %>% 
+  filter(n() > 1) %>% 
+  ungroup()
+
+unique_dupes <- duplicates_in %>% 
+  distinct(first_name, last_name, date, dob)
+
+for (i in 1:nrow(unique_dupes)) {
+  fn   <- unique_dupes$first_name[i]
+  ln   <- unique_dupes$last_name[i]
+  dt   <- unique_dupes$date[i]
+  dob  <- unique_dupes$dob[i]
+  
+  # check if they have a checkout already
+  has_checkout <- nrow(
+    data_out %>% filter(first_name == fn, last_name == ln, date == dt)
+  ) > 0
+  
+  if (has_checkout) {
+    # they have a checkout already - just delete second check in
+    data_in <- data_in %>%
+      filter(!(first_name == fn & last_name == ln & 
+               date == dt & dob == dob &
+               duplicated(cbind(first_name, last_name, date, dob))))
+    
+  } else {
+    # no checkout - move second check in to data_out
+    extra_row <- data_in %>%
+      filter(first_name == fn, last_name == ln, date == dt) %>%
+      slice(2) %>%
+      rename(timestamp_out = timestamp_in) %>%
+      mutate(department = NA_character_) %>%
+      select(-email_personal)
+    
+    data_out <- bind_rows(data_out, extra_row)
+    
+    # then delete second check in
+    data_in <- data_in %>%
+      filter(!(first_name == fn & last_name == ln & 
+               date == dt &
+               duplicated(cbind(first_name, last_name, date, dob))))
+  }
+}
+```
+There is one person whose duplicate date is not working - need to manually investigate
+
+
+Find the duplicate in data_out
+```{r}
+data_out %>% 
+group_by(first_name, last_name, date) %>% 
+filter(n() > 1) %>% 
+arrange(last_name, first_name, date) %>% 
+View()
+```
+One that is not working - need to manually imput
+
+Can create a for loop that deletes the first duplicate entry in data out if there is a data in. If no data in, puts the first entry into data_in
+
+```{r}
+duplicates_out <- data_out %>% 
+  group_by(first_name, last_name, date, dob) %>% 
+  filter(n() > 1) %>% 
+  ungroup()
+
+unique_dupes <- duplicates_out %>% 
+  distinct(first_name, last_name, date, dob)
+
+for (i in 1:nrow(unique_dupes)) {
+  fn  <- unique_dupes$first_name[i]
+  ln  <- unique_dupes$last_name[i]
+  dt  <- unique_dupes$date[i]
+  dob <- unique_dupes$dob[i]
+  
+  # check if they have a checkin already
+  has_checkin <- nrow(
+    data_in %>% filter(first_name == fn, last_name == ln, date == dt)
+  ) > 0
+  
+  if (has_checkin) {
+    # has a checkin - just delete the duplicate checkout
+    data_out <- data_out %>%
+      filter(!(first_name == fn & last_name == ln & 
+                 date == dt &
+                 duplicated(cbind(first_name, last_name, date, dob), fromLast = TRUE)))
+    
+  } else {
+    # no checkin - move first checkout to data_in
+    extra_row <- data_out %>%
+      filter(first_name == fn, last_name == ln, date == dt) %>%
+      slice(1) %>%
+      rename(timestamp_in = timestamp_out) %>%
+      mutate(email_personal = NA_character_) %>%
+      select(-department)
+    
+    data_in <- bind_rows(data_in, extra_row)
+    
+    # then delete duplicate from data_out
+    data_out <- data_out %>%
+      filter(!(first_name == fn & last_name == ln & 
+               date == dt &
+               duplicated(cbind(first_name, last_name, date, dob))))
+  }
+}
+
+# should return 0 duplicates
+data_out %>% 
+  group_by(first_name, last_name, date, dob) %>% 
+  filter(n() > 1)
+```
+
+Remerge after all cleaning
+```{r}
+merged_name_dob <- data_in %>% 
+  left_join(data_out, by = c("first_name", "last_name", "date", "dob"))
+```
+
+Check if extra rows from best model: first+last+date+dob
+```{r}
+merged_name_dob %>% 
+group_by(first_name, last_name, date, dob) %>%
+filter(n() > 1) %>% 
+arrange(last_name, first_name, date) %>% 
+View()
+```
+
+Check rows; merged == data_in
+```{r}
+nrow(merged_name_dob) #3785
+nrow(data_in) #3785
+```
+*check how many email personal in checkin match email in checkout*
+
+# PHONE NUMBERS 
+Phone numbers are coming in as scientific notation
+The phone numbers are in the Excel correct, but they are not coming through correctly; we have enough defining features that we should not need the phone numbers, but if we want them to be perfect, we will need to go back and clean them further. Additionally will need to consider if displaying in dashboard. From comparing output to the spreadsheet, I believe it messes up a phone number the same way for all (Ex: Emma S. has a 0 added to the beginning and 1 added to the end of her phone number in all of her entries so her phone number ends up being wrong, but still consistently hers).
+
+Strip all dashes and parentheses to leave only numbers
+```{r}
+data_in <- data_in %>% 
+mutate(phone = str_replace_all(phone, "[\^0-9]", ""))
+```
+
+Every phone number should have 10 digits
+```{r}
+data_in %>% count(nchar(phone)) 
+data_in %>% filter(nchar(phone) == 13)
+```
+
+Add back in the leading zeros
+```{r}
+df_in <- df_in %>% 
+mutate(phone = as.character(as.numeric(phone))) %>% 
+mutate(phone = ifelse(nchar(phone) == 9, paste0("0", phone), phone)
+```
+
+# DURATION
+I want to ensure everyone is lined up correctly before doing duration
+
+Create total time by doing time out - time in
+```{r}
+merged_name_dob <- merged_name_dob %>% 
+  mutate(
+  time_in = as.POSIXct(timestamp_in, format = "%Y-%m-%d %H:%M:%S"), 
+  time_out = as.POSIXct(timestamp_out, format = "%Y-%m-%d %H:%M:%S"), 
+  duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")),
+  total_time = sprintf("%dh %dm", as.integer(duration %/% 60),
+  as.integer(duration %% 60)) )
+View(merged_name_dob)
+```
+
+Explore duration data
+```{r}
+range(na.omit(merged_name_dob$duration)) # -0.8 - 706.305
+```
+
+How many are NAs
+*205 had mistyped birthdays*
+```{r}
+sum(is.na(merged_name_dob$duration)) # 393 NA - why this many....
+
+# Examine those that are NAs
+missing_duration <- merged_name_dob %>% 
+  filter(is.na(duration))
+
+# people who have a checkout but failed to match
+fixable_dob <- missing_duration %>%
+  inner_join(data_out, by = c("first_name", "last_name", "date"))
+
+nrow(fixable_dob) #205 - did not match on dob data_out, fix by imputting dob from check in to their check out.
+
+# create for loop that will match by first, last, date and imput the dob reported at check in to dob at check out
+for (i in 1:nrow(fixable_dob)) {
+  fn  <- fixable_dob$first_name[i]
+  ln  <- fixable_dob$last_name[i]
+  dt  <- fixable_dob$date[i]
+  correct_dob <- fixable_dob$dob.x[i]  # dob from data_in (check in)
+  
+  # update dob in data_out to match data_in
+  data_out <- data_out %>%
+    mutate(dob = case_when(
+      first_name == fn & last_name == ln & date == dt ~ correct_dob,
+      TRUE ~ dob
+    ))
+}
+
+# remerge and recreate duration columns 
+merged_name_dob <- data_in %>% 
+  left_join(data_out, by = c("first_name", "last_name", "date", "dob"))
+merged_name_dob <- merged_name_dob %>% 
+  mutate(
+  time_in = as.POSIXct(timestamp_in, format = "%Y-%m-%d %H:%M:%S"), 
+  time_out = as.POSIXct(timestamp_out, format = "%Y-%m-%d %H:%M:%S"), 
+  duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")),
+  total_time = sprintf("%dh %dm", as.integer(duration %/% 60),
+  as.integer(duration %% 60)) )
+
+sum(is.na(merged_name_dob$duration)) # 188
+
+# people with no checkout record at all - either did not check out or could have mistake in name; create another for loop/do same dob procudure with first and last name to determine spelling issue; any left after those two for loops do not have a check out and will need to have one created 
+truly_missing <- missing_duration %>%
+  anti_join(data_out, by = c("first_name", "last_name", "date"))
+View(truly_missing)
+
+
+```
+
+
+Graph duration data
+```{r}
+hist(na.omit(merged_name_dob$duration))
+```
+
+# UNIQUE VOLUNTEER ID
+
+Load data
+```{r}
+database <- read_excel("Volunteer_Database_2024.xlsx", col_types = c(
+  "numeric", # ID
+  "text", # First Name
+  "text", # Last Name
+  "text", # Volunteer Address 1
+  "text", # Volunteer Address 2
+  "text", # City
+  "text", # State
+  "text", # Zip Code
+  "text", # Cell
+  "text" # Email
+))
+```
+
+Changes names to be in wanted format
+```{r}
+database <- database %>% 
+    rename( 
+    ID = 'ID', 
+    first_name = 'First Name',
+    last_name ='Last Name', 
+    address1 = 'VolunteerAddress1', 
+    address2 ='Volunteer Address2', 
+    city = 'VolunteerCity',
+    state = 'State', 
+    zipcode = 'Zip Code', 
+    phone = 'Cell', 
+    email = 'Volunteer e-mail',
+)
+```
+
+Trim and standardize all free text (first/last name, email)
+```{r}
+database <- database %>% 
+  mutate( 
+    first_name =str_to_lower(str_trim(first_name)), 
+    last_name = str_to_lower(str_trim(last_name)), 
+    email = str_to_lower(str_trim(email)),
+    address1 = str_to_lower(str_trim(address1)), 
+    address2 = str_to_lower(str_trim(address2)), 
+    city = str_to_lower(str_trim(city)),
+    state = str_to_lower(str_trim(state)) 
+)
+```
+
+Cycle through ID numbers, drop any duplicates and assign ID numbers to any blanks
+
+Compare to merged dataset and apply next, sequential ID number to those who have not appeared yet
+
+Probably should add leading 0s? look up good practice for id numbers
