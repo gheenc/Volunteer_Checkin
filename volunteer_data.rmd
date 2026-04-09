@@ -324,6 +324,7 @@ View()
 One that is not working - need to manually imput
 
 Can create a for loop that deletes the first duplicate entry in data out if there is a data in. If no data in, puts the first entry into data_in
+*Before this runs, check how many had duplicate entries for report*
 
 ```{r}
 duplicates_out <- data_out %>% 
@@ -399,29 +400,6 @@ nrow(data_in) #3785
 ```
 *check how many email personal in checkin match email in checkout*
 
-# PHONE NUMBERS 
-Phone numbers are coming in as scientific notation
-The phone numbers are in the Excel correct, but they are not coming through correctly; we have enough defining features that we should not need the phone numbers, but if we want them to be perfect, we will need to go back and clean them further. Additionally will need to consider if displaying in dashboard. From comparing output to the spreadsheet, I believe it messes up a phone number the same way for all (Ex: Emma S. has a 0 added to the beginning and 1 added to the end of her phone number in all of her entries so her phone number ends up being wrong, but still consistently hers).
-
-Strip all dashes and parentheses to leave only numbers
-```{r}
-data_in <- data_in %>% 
-mutate(phone = str_replace_all(phone, "[\^0-9]", ""))
-```
-
-Every phone number should have 10 digits
-```{r}
-data_in %>% count(nchar(phone)) 
-data_in %>% filter(nchar(phone) == 13)
-```
-
-Add back in the leading zeros
-```{r}
-df_in <- df_in %>% 
-mutate(phone = as.character(as.numeric(phone))) %>% 
-mutate(phone = ifelse(nchar(phone) == 9, paste0("0", phone), phone)
-```
-
 # DURATION
 I want to ensure everyone is lined up correctly before doing duration
 
@@ -444,6 +422,9 @@ range(na.omit(merged_name_dob$duration)) # -0.8 - 706.305
 
 How many are NAs
 *205 had mistyped birthdays*
+*34 mistyped their first name - some used nicknames, some had additional information, some put last name also*
+*__ mistyped last name*
+*___ forgot to checkout*
 ```{r}
 sum(is.na(merged_name_dob$duration)) # 393 NA - why this many....
 
@@ -451,7 +432,7 @@ sum(is.na(merged_name_dob$duration)) # 393 NA - why this many....
 missing_duration <- merged_name_dob %>% 
   filter(is.na(duration))
 
-# people who have a checkout but failed to match
+# people who have a checkout but failed to match on dob
 fixable_dob <- missing_duration %>%
   inner_join(data_out, by = c("first_name", "last_name", "date"))
 
@@ -485,19 +466,116 @@ merged_name_dob <- merged_name_dob %>%
 
 sum(is.na(merged_name_dob$duration)) # 188
 
+# need to reupdate missing_duration to be the people still missing after fixing dob
+missing_duration <- merged_name_dob %>% 
+  filter(is.na(duration)) 
+nrow(missing_duration) #188
+```
+
+People who have a checkout but failed to match on first name
+```{r}
+# people who have a checkout but failed to match on first name
+fixable_first <- missing_duration %>%
+  inner_join(data_out, by = c("dob", "last_name", "date"))
+nrow(fixable_first) #34
+
+# manually replace odd ones
+fixable_first$first_name.y[fixable_first$first_name.y == "rgymmmmm"] <- "amaia"
+fixable_first$first_name.y[fixable_first$first_name.y == "muhammad.a.ali-1@ou.edu"] <- "muhammad"
+fixable_first$first_name.y[fixable_first$first_name.y == "4.056578909e9"] <- "eli"
+
+# initialize note column; run before the first time adding something to note column
+if (!"note" %in% names(fixable_first)) {
+  fixable_first <- fixable_first %>% mutate(note = NA_character_)
+}
+
+# anything that is after the first space or a /, adds to a note column; if someone has notes in both their check in and check out first name, adds both to note with a | seperator
+fixable_first <- fixable_first %>%
+  mutate(
+    new_note = case_when(
+      str_detect(first_name.x, "[ /]") & str_detect(first_name.y, "[ /]") ~ 
+        paste(str_extract(first_name.x, "(?<=[ /]).*"), 
+              str_extract(first_name.y, "(?<=[ /]).*"), sep = " | "),
+      str_detect(first_name.x, "[ /]") ~ str_extract(first_name.x, "(?<=[ /]).*"),
+      str_detect(first_name.y, "[ /]") ~ str_extract(first_name.y, "(?<=[ /]).*"),
+      TRUE ~ NA_character_
+    ),
+    note = case_when(
+      is.na(note) & is.na(new_note) ~ NA_character_,
+      is.na(note)                   ~ new_note,
+      is.na(new_note)               ~ note,
+      TRUE                          ~ paste(note, new_note, sep = " | ")
+    ),
+    first_name.x = str_trim(str_extract(first_name.x, "^[^ /]+")),
+    first_name.y = str_trim(str_extract(first_name.y, "^[^ /]+"))
+  ) %>%
+  select(-new_note)
+
+# could use fuzzmatch (agrep and adist) to fix
+# find names in missingduration checkout first that approximately missing duration check in first
+# how do i fix both typos in check in first name and check out first name
+
+# remerge based on what is fixed
+merged_name_dob <- data_in %>% 
+  left_join(data_out, by = c("first_name", "last_name", "date", "dob"))
+merged_name_dob <- merged_name_dob %>% 
+  mutate(
+  time_in = as.POSIXct(timestamp_in, format = "%Y-%m-%d %H:%M:%S"), 
+  time_out = as.POSIXct(timestamp_out, format = "%Y-%m-%d %H:%M:%S"), 
+  duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")),
+  total_time = sprintf("%dh %dm", as.integer(duration %/% 60),
+  as.integer(duration %% 60)) )
+missing_duration <- merged_name_dob %>% 
+  filter(is.na(duration))
+
+#ensure missing duration is same as nrow in missing_duration
+sum(is.na(merged_name_dob$duration)) 
+
+# need to reupdate missing_duration to be the people still missing after fixing dob
+missing_duration <- merged_name_dob %>% 
+  filter(is.na(duration)) 
+nrow(missing_duration) 
+```
+
+
+
+People with no checkout record at all
+```{r}
 # people with no checkout record at all - either did not check out or could have mistake in name; create another for loop/do same dob procudure with first and last name to determine spelling issue; any left after those two for loops do not have a check out and will need to have one created 
 truly_missing <- missing_duration %>%
   anti_join(data_out, by = c("first_name", "last_name", "date"))
 View(truly_missing)
-
-
 ```
-
 
 Graph duration data
 ```{r}
 hist(na.omit(merged_name_dob$duration))
 ```
+
+
+# PHONE NUMBERS 
+Phone numbers are coming in as scientific notation
+The phone numbers are in the Excel correct, but they are not coming through correctly; we have enough defining features that we should not need the phone numbers, but if we want them to be perfect, we will need to go back and clean them further. Additionally will need to consider if displaying in dashboard. From comparing output to the spreadsheet, I believe it messes up a phone number the same way for all (Ex: Emma S. has a 0 added to the beginning and 1 added to the end of her phone number in all of her entries so her phone number ends up being wrong, but still consistently hers).
+
+Strip all dashes and parentheses to leave only numbers
+```{r}
+data_in <- data_in %>% 
+mutate(phone = str_replace_all(phone, "[\^0-9]", ""))
+```
+
+Every phone number should have 10 digits
+```{r}
+data_in %>% count(nchar(phone)) 
+data_in %>% filter(nchar(phone) == 13)
+```
+
+Add back in the leading zeros
+```{r}
+df_in <- df_in %>% 
+mutate(phone = as.character(as.numeric(phone))) %>% 
+mutate(phone = ifelse(nchar(phone) == 9, paste0("0", phone), phone)
+```
+
 
 # UNIQUE VOLUNTEER ID
 
