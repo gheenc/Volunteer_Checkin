@@ -425,6 +425,8 @@ How many are NAs
 *34 mistyped their first name - some used nicknames, some had additional information, some put last name also*
 *__ mistyped last name*
 *___ forgot to checkout*
+
+#Relook at dob, there are some people who are putting the date, want to make sure this is not rewriting
 ```{r}
 sum(is.na(merged_name_dob$duration)) # 393 NA - why this many....
 
@@ -437,7 +439,7 @@ fixable_dob <- missing_duration %>%
   inner_join(data_out, by = c("first_name", "last_name", "date"))
 
 nrow(fixable_dob) #205 - did not match on dob data_out, fix by imputting dob from check in to their check out.
-
+View(fixable_dob)
 # create for loop that will match by first, last, date and imput the dob reported at check in to dob at check out
 for (i in 1:nrow(fixable_dob)) {
   fn  <- fixable_dob$first_name[i]
@@ -446,12 +448,15 @@ for (i in 1:nrow(fixable_dob)) {
   correct_dob <- fixable_dob$dob.x[i]  # dob from data_in (check in)
   
   # update dob in data_out to match data_in
-  data_out <- data_out %>%
+  # did i only correct typos in data_out here? what is there is a data_in typo
+  
+data_out <- data_out %>%
     mutate(dob = case_when(
       first_name == fn & last_name == ln & date == dt ~ correct_dob,
       TRUE ~ dob
     ))
 }
+View(data_out)
 
 # remerge and recreate duration columns 
 merged_name_dob <- data_in %>% 
@@ -479,10 +484,14 @@ fixable_first <- missing_duration %>%
   inner_join(data_out, by = c("dob", "last_name", "date"))
 nrow(fixable_first) #34
 
-# manually replace odd ones
-fixable_first$first_name.y[fixable_first$first_name.y == "rgymmmmm"] <- "amaia"
-fixable_first$first_name.y[fixable_first$first_name.y == "muhammad.a.ali-1@ou.edu"] <- "muhammad"
-fixable_first$first_name.y[fixable_first$first_name.y == "4.056578909e9"] <- "eli"
+# apply changes to data_out
+fixable_first <- fixable_first %>%
+  mutate(first_name = case_when(
+    first_name == "rgymmmmm"            ~ "amaia",
+    first_name == "muhammad.a.ali-1@ou.edu" ~ "muhammad",
+    first_name == "4.056578909e9"       ~ "eli",
+    TRUE ~ first_name
+  ))
 
 # initialize note column; run before the first time adding something to note column
 if (!"note" %in% names(fixable_first)) {
@@ -512,8 +521,101 @@ fixable_first <- fixable_first %>%
   select(-new_note)
 
 # could use fuzzmatch (agrep and adist) to fix
-# find names in missingduration checkout first that approximately missing duration check in first
-# how do i fix both typos in check in first name and check out first name
+# use data_in as ground truth; find someone who matches on last name and first name and vote for whatever best matches between misspelled check in/check out first name
+name_corrections <- data.frame(
+  first_name_in  = character(),
+  first_name_out = character(),
+  correct_name   = character(),
+  source         = character(),
+  stringsAsFactors = FALSE
+)
+
+for (i in 1:nrow(fixable_first)) {
+  fn_in  <- fixable_first$first_name.x[i]
+  fn_out <- fixable_first$first_name.y[i]
+  ln     <- fixable_first$last_name[i]
+  dob_i  <- fixable_first$dob[i]
+  
+  candidate <- data_in %>% 
+    filter(last_name == ln, dob == dob_i)
+  
+  if (nrow(candidate) > 0) {
+    db_name <- candidate %>%
+      count(first_name) %>% 
+      arrange(desc(n)) %>% 
+      slice(1) %>% 
+      pull(first_name)
+  } else {
+    db_name <- fn_in  # fall back to check in name if no candidate found
+  }
+  
+  match_x <- agrep(db_name, fn_in,  value = TRUE, max.distance = 0.2)
+  match_y <- agrep(db_name, fn_out, value = TRUE, max.distance = 0.2)
+  
+  correct <- case_when(
+    length(match_x) > 0 & length(match_y) > 0 ~ db_name,
+    length(match_x) > 0                        ~ fn_in,
+    length(match_y) > 0                        ~ fn_out,
+    TRUE                                        ~ db_name
+  )
+  
+  name_corrections <- bind_rows(name_corrections, data.frame(
+    first_name_in  = fn_in,
+    first_name_out = fn_out,
+    correct_name   = correct,
+    source         = ifelse(nrow(candidate) > 0, "frequency", "no match")
+  ))
+}
+
+# check what was corrected, to what and from where
+name_corrections %>% distinct() %>% arrange(first_name_in)
+
+# imput names that were corrected into fixable first. then imput all of fixable first into data_in and data_out
+
+# imput what is correct into the originally wrong entry
+for (i in 1:nrow(name_corrections)) {
+  fn_in      <- name_corrections$first_name_in[i]
+  fn_out     <- name_corrections$first_name_out[i]
+  correct    <- name_corrections$correct_name[i]
+  
+  # if check in name was wrong, fix it in fixable first
+  if (fn_in != correct) {
+    fixable_first <- fixable_first %>%
+      mutate(first_name.x = case_when(
+        first_name.x == fn_in ~ correct,
+        TRUE ~ first_name
+      ))
+  }
+  
+  # if check out name was wrong, fix it in fixable_first
+  if (fn_out != correct) {
+    fixable_first <- fixable_first %>%
+      mutate(first_name.y = case_when(
+        first_name.y == fn_out ~ correct,
+        TRUE ~ first_name
+      ))
+  }
+}
+
+# push all of fixable first to data_in and data_out including adding the new notes column
+# push corrected first names back to data_in
+data_in <- data_in %>%
+  left_join(
+    fixable_first %>% select(last_name, dob, date, first_name.x, note) %>% 
+      rename(first_name = first_name.x),
+    by = c("last_name", "dob", "date")
+  ) %>%
+  mutate(first_name = coalesce(first_name.y, first_name)) %>% mutate(note = note) %>% 
+  select(-first_name.y)
+
+# push corrected first names back to data_out
+data_out <- data_out %>%
+  left_join(
+    fixable_first %>% select(last_name, dob, date, first_name.y, note),
+    by = c("last_name", "dob", "date")
+  ) %>%
+  mutate(first_name = coalesce(first_name.y, first_name)) %>% mutate(note = note) %>% 
+  select(-first_name.y)
 
 # remerge based on what is fixed
 merged_name_dob <- data_in %>% 
@@ -529,12 +631,12 @@ missing_duration <- merged_name_dob %>%
   filter(is.na(duration))
 
 #ensure missing duration is same as nrow in missing_duration
-sum(is.na(merged_name_dob$duration)) 
+sum(is.na(merged_name_dob$duration)) #181
 
 # need to reupdate missing_duration to be the people still missing after fixing dob
 missing_duration <- merged_name_dob %>% 
   filter(is.na(duration)) 
-nrow(missing_duration) 
+nrow(missing_duration) #181 - should've fixed 34
 ```
 
 
