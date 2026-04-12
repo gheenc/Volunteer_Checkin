@@ -43,6 +43,7 @@ library(dplyr)
 library(lubridate) 
 library(stringr)
 library(writexl)
+library(fuzzyjoin)
 ```
 
 # Call in Data and Format
@@ -63,6 +64,7 @@ data_in <- read_excel(
     "skip"     # mask
   )
 )
+nrow(data_in)
 ```
 6 DOBs were outside expected range - default changed these to be NA
 
@@ -107,6 +109,7 @@ data_out <- read_excel(
     "text"     # department
   )
 )
+nrow(data_out)
 ```
 3 DOB were out of range - default changed to NA
 
@@ -259,7 +262,7 @@ Find the duplicate in data_in
 duplicates_in <- data_in %>% 
 group_by(first_name, last_name, date) %>% 
 filter(n() > 1) %>% 
-arrange(last_name, first_name, date) %>% View()
+arrange(last_name, first_name, date)
 ```
 
 For loop that filters through duplicates - if they have two check ins and a check out, delete the second check in. If they only have two check ins, move the second check in to check out
@@ -318,8 +321,7 @@ Find the duplicate in data_out
 data_out %>% 
 group_by(first_name, last_name, date) %>% 
 filter(n() > 1) %>% 
-arrange(last_name, first_name, date) %>% 
-View()
+arrange(last_name, first_name, date)
 ```
 One that is not working - need to manually imput
 
@@ -437,9 +439,17 @@ missing_duration <- merged_name_dob %>%
 # people who have a checkout but failed to match on dob
 fixable_dob <- missing_duration %>%
   inner_join(data_out, by = c("first_name", "last_name", "date"))
+fixable_name <- missing_duration %>%
+  inner_join(data_out, by = c("dob", "last_name", "date"))
+nrow(fixable_name) #34 first name
+fixable_last <- missing_duration %>%
+  inner_join(data_out, by = c("dob", "first_name", "date"))
+nrow(fixable_last) #25 last name -129 never checked out 
+nrow(data_in) - nrow(data_out) #88 
+
 
 nrow(fixable_dob) #205 - did not match on dob data_out, fix by imputting dob from check in to their check out.
-View(fixable_dob)
+
 # create for loop that will match by first, last, date and imput the dob reported at check in to dob at check out
 for (i in 1:nrow(fixable_dob)) {
   fn  <- fixable_dob$first_name[i]
@@ -456,7 +466,6 @@ data_out <- data_out %>%
       TRUE ~ dob
     ))
 }
-View(data_out)
 
 # remerge and recreate duration columns 
 merged_name_dob <- data_in %>% 
@@ -569,6 +578,7 @@ for (i in 1:nrow(fixable_first)) {
 
 # check what was corrected, to what and from where
 name_corrections %>% distinct() %>% arrange(first_name_in)
+View(name_corrections)
 
 # imput names that were corrected into fixable first. then imput all of fixable first into data_in and data_out
 
@@ -733,3 +743,905 @@ Cycle through ID numbers, drop any duplicates and assign ID numbers to any blank
 Compare to merged dataset and apply next, sequential ID number to those who have not appeared yet
 
 Probably should add leading 0s? look up good practice for id numbers
+
+```{r}
+nrow(data_in)
+nrow(merged_name_dob)
+nrow(unique(merged_name_dob$first_name))
+# assign id for the non 393 duplicated
+#if else statement to imput corrected name to whatever value is incorrect
+```
+
+
+# Reattempt at fuzzy matching
+starting at merged_name_dob
+```{r}
+nrow(data_in) # 3805
+nrow(data_out) # 3701
+nrow(data_in) - nrow(data_out) ## 104
+
+merged <- data_in %>% 
+left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
+nrow(merged_dob) # 3893
+```
+
+assign row id individually to data_in and data_out
+```{r}
+data_in  <- data_in  %>% mutate(id_in  = row_number())
+data_out <- data_out %>% mutate(id_out = row_number())
+```
+
+Fix duplicate check in - people who submitted two check ins instead of check in check out will have the second check in occurance go to check out
+```{r}
+# save count for report before modifying
+duplicates_in <- data_in %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+n_dupes_in <- nrow(duplicates_in)  # save for report
+
+unique_dupes_in <- duplicates_in %>%
+  distinct(first_name, last_name, date, dob)
+
+for (i in 1:nrow(unique_dupes_in)) {
+  fn    <- unique_dupes_in$first_name[i]
+  ln    <- unique_dupes_in$last_name[i]
+  dt    <- unique_dupes_in$date[i]
+  dob_i <- unique_dupes_in$dob[i]  
+
+  # check if they have a checkout already
+  has_checkout <- nrow(
+    data_out %>% filter(first_name == fn, last_name == ln, date == dt, dob == dob_i)
+  ) > 0
+
+  if (has_checkout) {
+    # has a checkout - delete all but first check-in
+    rows_to_remove <- data_in %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      slice(-1) %>%  # keep first, remove the rest
+      pull(id_in)
+
+    data_in <- data_in %>% filter(!id_in %in% rows_to_remove)
+
+  } else {
+    # no checkout - move all extra check-ins to data_out
+    extra_rows <- data_in %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      slice(-1) %>%  # everything except the first
+      rename(timestamp_out = timestamp_in) %>%
+      mutate(department = NA_character_) %>%
+      select(-email_personal)
+
+    data_out <- bind_rows(data_out, extra_rows)
+
+    # delete the extra check-ins from data_in
+    rows_to_remove <- data_in %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      slice(-1) %>%
+      pull(id_in)
+
+    data_in <- data_in %>% filter(!id_in %in% rows_to_remove)
+  }
+}
+
+# verify - should return 0 rows
+data_in %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1)
+```
+
+Fix duplicate check out - people who submitted two check outs instead of check in check out will have the first check out occurance go to check in
+```{r}
+# check for any data_out duplicates first (for manual review + report)
+duplicates_out <- data_out %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+n_dupes_out <- nrow(duplicates_out)  # save for report
+
+# inspect before running loop - flag anything unexpected
+duplicates_out %>% arrange(last_name, first_name, date)
+
+unique_dupes_out <- duplicates_out %>%
+  distinct(first_name, last_name, date, dob)
+
+for (i in 1:nrow(unique_dupes_out)) {
+  fn    <- unique_dupes_out$first_name[i]
+  ln    <- unique_dupes_out$last_name[i]
+  dt    <- unique_dupes_out$date[i]
+  dob_i <- unique_dupes_out$dob[i]
+
+  # check if they have a check-in already
+  has_checkin <- nrow(
+    data_in %>% filter(first_name == fn, last_name == ln, date == dt, dob == dob_i)
+  ) > 0
+
+  if (has_checkin) {
+    # has a check-in - delete all but first checkout
+    rows_to_remove <- data_out %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      slice(-1) %>%  # keep first, remove the rest
+      pull(id_out)
+
+    data_out <- data_out %>% filter(!id_out %in% rows_to_remove)
+
+  } else {
+    # no check-in - move first checkout to data_in
+    extra_row <- data_out %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      slice(1) %>%
+      rename(timestamp_in = timestamp_out) %>%
+      mutate(email_personal = NA_character_) %>%
+      select(-department)
+
+    data_in <- bind_rows(data_in, extra_row)
+
+    # delete all duplicates from data_out
+    rows_to_remove <- data_out %>%
+      filter(first_name == fn, last_name == ln, date == dt, dob == dob_i) %>%
+      pull(id_out)
+
+    data_out <- data_out %>% filter(!id_out %in% rows_to_remove)
+  }
+}
+
+# verify - should return 0 rows
+data_out %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1)
+```
+
+```{r}
+# 1. did row counts change as expected?
+nrow(data_in)# 3788
+nrow(data_out) #3692
+
+# 2. are there any remaining duplicates in data_in?
+data_in %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1) #0
+
+# 3. are there any remaining duplicates in data_out?
+data_out %>%
+  group_by(first_name, last_name, date, dob) %>%
+  filter(n() > 1) #0
+
+# remerge
+merged <- data_in %>% 
+left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
+nrow(merged) # 3788
+nrow(data_in) #3788
+```
+
+Ok, now there are no extra check in occurances. Make duration column and check how many NA
+```{r}
+# calculate duration
+merged <- merged %>%
+  mutate(duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")))
+
+# then check NAs
+sum(is.na(merged$duration)) #398 NA
+
+# and see what they look like
+merged %>%
+  filter(is.na(duration)) %>%
+  select(first_name, last_name, date, dob, timestamp_in, timestamp_out) %>% View()
+```
+Clean id columns from rbind
+```{r}
+# remove artifact columns from data_in and data_out
+data_in  <- data_in  %>% select(-any_of("id_out"))
+data_out <- data_out %>% select(-any_of("id_in"))
+
+# reassign clean IDs
+data_in  <- data_in  %>% mutate(id_in  = row_number())
+data_out <- data_out %>% mutate(id_out = row_number())
+
+# remerge cleanly
+merged <- data_in %>%
+  left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
+
+names(merged)  # should now be clean with no .x .y on IDs
+```
+
+Pull in all unmatched checkouts
+```{r}
+# these are unmatched AND clean enough to have joined correctly
+unmatched_out_clean <- data_out %>%
+  anti_join(merged, by = c("first_name", "last_name", "date", "dob"))
+nrow(unmatched_out_clean) #302
+
+# but the TRUE unmatched pool is actually the NAs in merged
+truly_unmatched_in <- merged %>%
+  filter(is.na(timestamp_out))
+nrow(truly_unmatched_in) #398
+```
+
+Clean data in of extra wording in either first name in or out and append to note column 
+```{r}
+# initialize note column in data_in
+if (!"note" %in% names(data_in)) {
+  data_in <- data_in %>% mutate(note = NA_character_)
+}
+
+data_in <- data_in %>%
+  mutate(
+    new_note_first = case_when(
+      str_detect(first_name, "[ /]") ~ str_extract(first_name, "(?<=[ /]).*"),
+      TRUE ~ NA_character_
+    ),
+    new_note_last = case_when(
+      str_detect(last_name, "[ /]") ~ str_extract(last_name, "(?<=[ /]).*"),
+      TRUE ~ NA_character_
+    ),
+    new_note = case_when(
+      !is.na(new_note_first) & !is.na(new_note_last) ~ paste(new_note_first, new_note_last, sep = " | "),
+      !is.na(new_note_first) ~ new_note_first,
+      !is.na(new_note_last)  ~ new_note_last,
+      TRUE ~ NA_character_
+    ),
+    note = case_when(
+      is.na(note) & is.na(new_note) ~ NA_character_,
+      is.na(note)                   ~ new_note,
+      is.na(new_note)               ~ note,
+      TRUE                          ~ paste(note, new_note, sep = " | ")
+    ),
+    first_name = str_trim(str_extract(first_name, "^[^ /]+")),
+    last_name  = str_trim(str_extract(last_name,  "^[^ /]+"))
+  ) %>%
+  select(-new_note_first, -new_note_last, -new_note)
+```
+
+Clean data out of extra wording in either first name in or out and append to note column 
+```{r}
+# initialize note column in data_out
+if (!"note" %in% names(data_out)) {
+  data_out <- data_out %>% mutate(note = NA_character_)
+}
+
+data_out <- data_out %>%
+  mutate(
+    new_note_first = case_when(
+      str_detect(first_name, "[ /]") ~ str_extract(first_name, "(?<=[ /]).*"),
+      TRUE ~ NA_character_
+    ),
+    new_note_last = case_when(
+      str_detect(last_name, "[ /]") ~ str_extract(last_name, "(?<=[ /]).*"),
+      TRUE ~ NA_character_
+    ),
+    new_note = case_when(
+      !is.na(new_note_first) & !is.na(new_note_last) ~ paste(new_note_first, new_note_last, sep = " | "),
+      !is.na(new_note_first) ~ new_note_first,
+      !is.na(new_note_last)  ~ new_note_last,
+      TRUE ~ NA_character_
+    ),
+    note = case_when(
+      is.na(note) & is.na(new_note) ~ NA_character_,
+      is.na(note)                   ~ new_note,
+      is.na(new_note)               ~ note,
+      TRUE                          ~ paste(note, new_note, sep = " | ")
+    ),
+    first_name = str_trim(str_extract(first_name, "^[^ /]+")),
+    last_name  = str_trim(str_extract(last_name,  "^[^ /]+"))
+  ) %>%
+  select(-new_note_first, -new_note_last, -new_note)
+```
+
+Remerge and reconcile notes 
+```{r}
+# remerge with clean names
+merged <- data_in %>%
+  left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
+
+# reconcile notes from both sides into a single note column
+merged <- merged %>%
+  mutate(
+    note = case_when(
+      is.na(note.x) & is.na(note.y) ~ NA_character_,
+      is.na(note.x)                  ~ note.y,
+      is.na(note.y)                  ~ note.x,
+      TRUE                           ~ paste(note.x, note.y, sep = " | ")
+    )
+  ) %>%
+  select(-note.x, -note.y)
+
+# verify row count still matches
+nrow(merged)   # should equal nrow(data_in) = 3788
+
+# check how notes look
+merged %>%
+  filter(!is.na(note)) %>%
+  select(first_name, last_name, date, note)
+```
+
+Recalculate duration and check NA
+```{r}
+merged <- merged %>%
+  mutate(duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")))
+
+sum(is.na(merged$duration))  # 383
+```
+
+Rebuild fuzzy matching potential pools
+```{r}
+# rebuild unmatched pools with clean data
+# people who checked in but can't find check out (ie have no timestamp out)
+unmatched_in <- data_in %>%
+  filter(!id_in %in% (merged %>% filter(!is.na(timestamp_out)) %>% pull(id_in)))
+
+# people who checked out but dont have a matched check in 
+unmatched_out <- data_out %>%
+  anti_join(merged, by = c("first_name", "last_name", "date", "dob"))
+
+nrow(unmatched_in)   # 383
+nrow(unmatched_out)  # 287
+```
+
+Fuzzy Matching
+First name typo - matches on last name, date and dob
+*17 people mistyped first name*
+```{r}
+library(stringdist)
+
+tier1_results <- list()
+
+for (i in 1:nrow(unmatched_in)) {
+  row_in <- unmatched_in[i, ]
+  
+  # filter candidates: exact match on last_name, dob, and date
+  candidates <- unmatched_out %>%
+    filter(
+      last_name == row_in$last_name,
+      dob       == row_in$dob,
+      date      == row_in$date
+    )
+  
+  if (nrow(candidates) == 0) next  # no candidates, skip to next
+  
+  # fuzzy match on first name only
+  dist_first <- stringdist(row_in$first_name, candidates$first_name, method = "jw")
+  
+  best_idx   <- which.min(dist_first)
+  best_score <- dist_first[best_idx]
+  
+  if (best_score >= 0.3) next  # outside threshold, skip
+  
+  tier1_results[[i]] <- tibble(
+    tier           = 1,
+    id_in          = row_in$id_in,
+    id_out         = candidates$id_out[best_idx],
+    first_name_in  = row_in$first_name,
+    last_name_in   = row_in$last_name,
+    dob_in         = row_in$dob,
+    first_name_out = candidates$first_name[best_idx],
+    last_name_out  = candidates$last_name[best_idx],
+    dob_out        = candidates$dob[best_idx],
+    date           = row_in$date,
+    score          = best_score,
+    status         = case_when(
+      best_score <  0.2 ~ "auto_accept",
+      best_score <  0.3 ~ "review",
+      TRUE              ~ "no_match"
+    )
+  )
+}
+
+tier1_matches <- bind_rows(tier1_results)
+
+# summary
+tier1_matches %>% count(status)
+
+# inspect auto_accept
+tier1_matches %>%
+  filter(status == "auto_accept") %>%
+  select(first_name_in, first_name_out, last_name_in, dob_in, date, score)
+
+# inspect review
+tier1_matches %>%
+  filter(status == "review") %>%
+  select(first_name_in, first_name_out, last_name_in, dob_in, date, score)
+tier1_matches %>% count(status)
+```
+
+Manually review 2
+```{r}
+tier1_matches %>%
+  filter(status == "review") %>%
+  select(id_in, id_out, first_name_in, first_name_out, last_name_in, dob_in, date, score)
+```
+
+Accept two manual reviews
+```{r}
+tier1_matches <- tier1_matches %>%
+  mutate(final_status = case_when(
+    status == "auto_accept"              ~ "accept",
+    status == "review" & id_in %in% c(173, 2542) ~ "accept",
+    TRUE                                 ~ "reject"
+  ))
+
+tier1_matches %>% count(final_status)
+```
+Remove accepted first name typos from both pools
+```{r}
+# remove tier 1 accepted matches from both pools
+accepted_in  <- tier1_matches %>% filter(final_status == "accept") %>% pull(id_in)
+accepted_out <- tier1_matches %>% filter(final_status == "accept") %>% pull(id_out)
+
+unmatched_in  <- unmatched_in  %>% filter(!id_in  %in% accepted_in)
+unmatched_out <- unmatched_out %>% filter(!id_out %in% accepted_out)
+
+nrow(unmatched_in)   # should be 383 - 19 = 364
+nrow(unmatched_out)  # should be 287 - 19 = 268
+```
+DOB Typo
+*147 mistyped their birthday*
+*Some people mistyped, some people put the date, lots put their birthday but the current year*
+```{r}
+tier2_results <- list()
+
+for (i in 1:nrow(unmatched_in)) {
+  row_in <- unmatched_in[i, ]
+  
+  # filter candidates: exact match on first_name, last_name, and date
+  candidates <- unmatched_out %>%
+    filter(
+      first_name == row_in$first_name,
+      last_name  == row_in$last_name,
+      date       == row_in$date
+    )
+  
+  if (nrow(candidates) == 0) next
+  
+  # fuzzy match on dob only - convert to character so digit typos are caught
+  dist_dob <- stringdist(
+    as.character(row_in$dob), 
+    as.character(candidates$dob), 
+    method = "jw"
+  )
+  
+  best_idx   <- which.min(dist_dob)
+  best_score <- dist_dob[best_idx]
+  
+  if (best_score >= 0.3) next
+  
+  tier2_results[[i]] <- tibble(
+    tier           = 2,
+    id_in          = row_in$id_in,
+    id_out         = candidates$id_out[best_idx],
+    first_name_in  = row_in$first_name,
+    last_name_in   = row_in$last_name,
+    dob_in         = row_in$dob,
+    dob_out        = candidates$dob[best_idx],
+    first_name_out = candidates$first_name[best_idx],
+    last_name_out  = candidates$last_name[best_idx],
+    date           = row_in$date,
+    score          = best_score,
+    status         = case_when(
+      best_score <  0.2 ~ "auto_accept",
+      best_score <  0.3 ~ "review",
+      TRUE              ~ "no_match"
+    )
+  )
+}
+
+tier2_matches <- bind_rows(tier2_results)
+
+tier2_matches %>% count(status)
+
+tier2_matches %>%
+  filter(status == "auto_accept") %>%
+  select(id_in, id_out, first_name_in, last_name_in, dob_in, dob_out, date, score)
+
+tier2_matches %>%
+  filter(status == "review") %>%
+  select(id_in, id_out, first_name_in, last_name_in, dob_in, dob_out, date, score) # 115 accepted, 32 review
+
+# distribution of review cases 
+tier2_matches %>%
+  filter(status == "review") %>%
+  arrange(score) %>%
+  select(id_in, id_out, first_name_in, last_name_in, dob_in, dob_out, date, score)
+
+tier2_matches %>%
+  filter(status == "review") %>%
+  summarise(
+    min_score  = min(score),
+    max_score  = max(score),
+    mean_score = mean(score)
+  )
+
+# look at the most and least confident review cases
+tier2_matches %>%
+  filter(status == "review") %>%
+  arrange(score) %>%
+  slice(c(1:5, (n()-4):n())) %>%  # top 5 and bottom 5
+  select(id_in, id_out, first_name_in, last_name_in, dob_in, dob_out, score, date)
+
+# accept all review cases
+tier2_matches <- tier2_matches %>%
+  mutate(final_status = case_when(
+    status == "auto_accept" ~ "accept",
+    status == "review"      ~ "accept",
+    TRUE                    ~ "reject"
+  ))
+
+tier2_matches %>% count(final_status) #147 accepted
+```
+
+Remove matched cases from pool
+```{r}
+accepted_in  <- tier2_matches %>% filter(final_status == "accept") %>% pull(id_in)
+accepted_out <- tier2_matches %>% filter(final_status == "accept") %>% pull(id_out)
+
+unmatched_in  <- unmatched_in  %>% filter(!id_in  %in% accepted_in)
+unmatched_out <- unmatched_out %>% filter(!id_out %in% accepted_out)
+
+nrow(unmatched_in)   # should be 364 - 147 = 217
+nrow(unmatched_out)  # should be 268 - 147 = 121
+```
+
+Typos in last name
+**
+```{r}
+tier3_results <- list()
+
+for (i in 1:nrow(unmatched_in)) {
+  row_in <- unmatched_in[i, ]
+  
+  # filter candidates: exact match on first_name, dob, and date
+  candidates <- unmatched_out %>%
+    filter(
+      first_name == row_in$first_name,
+      dob        == row_in$dob,
+      date       == row_in$date
+    )
+  
+  if (nrow(candidates) == 0) next
+  
+  # fuzzy match on last name only
+  dist_last <- stringdist(row_in$last_name, candidates$last_name, method = "jw")
+  
+  best_idx   <- which.min(dist_last)
+  best_score <- dist_last[best_idx]
+  
+  if (best_score >= 0.3) next
+  
+  tier3_results[[i]] <- tibble(
+    tier           = 3,
+    id_in          = row_in$id_in,
+    id_out         = candidates$id_out[best_idx],
+    first_name_in  = row_in$first_name,
+    last_name_in   = row_in$last_name,
+    last_name_out  = candidates$last_name[best_idx],
+    dob_in         = row_in$dob,
+    dob_out        = candidates$dob[best_idx],
+    first_name_out = candidates$first_name[best_idx],
+    date           = row_in$date,
+    score          = best_score,
+    status         = case_when(
+      best_score <  0.2 ~ "auto_accept",
+      best_score <  0.3 ~ "review",
+      TRUE              ~ "no_match"
+    )
+  )
+}
+
+tier3_matches <- bind_rows(tier3_results)
+
+tier3_matches %>% count(status)
+
+tier3_matches %>%
+  filter(status == "auto_accept") %>%
+  select(id_in, id_out, first_name_in, last_name_in, last_name_out, dob_in, date, score)
+
+tier3_matches %>%
+  filter(status == "review") %>%
+  select(id_in, id_out, first_name_in, last_name_in, last_name_out, dob_in, date, score)
+
+# accept all auto reviews
+tier3_matches <- tier3_matches %>%
+  mutate(final_status = case_when(
+    status == "auto_accept" ~ "accept",
+    status == "review"      ~ "accept",
+    TRUE                    ~ "reject"
+  ))
+
+tier3_matches %>% count(final_status)
+```
+
+Remove matched from pool
+```{r}
+accepted_in  <- tier3_matches %>% filter(final_status == "accept") %>% pull(id_in)
+accepted_out <- tier3_matches %>% filter(final_status == "accept") %>% pull(id_out)
+
+unmatched_in  <- unmatched_in  %>% filter(!id_in  %in% accepted_in)
+unmatched_out <- unmatched_out %>% filter(!id_out %in% accepted_out)
+
+# 200 people who checked in but cannot find a check out
+nrow(unmatched_in)   # should be 217 - 17 = 200
+# 104 people who checked out but cannot find a check in
+nrow(unmatched_out)  # should be 121 - 17 = 104
+```
+
+Determine which instances is right, by looking at frequency table of pair for each type of typo
+```{r}
+# combine all accepted matches
+all_matches <- bind_rows(
+  tier1_matches %>% filter(final_status == "accept"),
+  tier2_matches %>% filter(final_status == "accept"),
+  tier3_matches %>% filter(final_status == "accept")
+)
+
+nrow(all_matches)  # should be 183
+
+# build frequency tables from both sides combined for each field
+# first name frequency - grouped by last name and dob
+first_name_freq <- bind_rows(
+  data_in  %>% select(first_name, last_name, dob),
+  data_out %>% select(first_name, last_name, dob)
+) %>%
+  group_by(last_name, dob, first_name) %>%
+  summarise(n = n(), .groups = "drop")
+
+# dob frequency - grouped by first name and last name
+dob_freq <- bind_rows(
+  data_in  %>% select(first_name, last_name, dob),
+  data_out %>% select(first_name, last_name, dob)
+) %>%
+  group_by(first_name, last_name, dob) %>%
+  summarise(n = n(), .groups = "drop")
+
+# last name frequency - grouped by first name and dob
+last_name_freq <- bind_rows(
+  data_in  %>% select(first_name, last_name, dob),
+  data_out %>% select(first_name, last_name, dob)
+) %>%
+  group_by(first_name, dob, last_name) %>%
+  summarise(n = n(), .groups = "drop")
+
+# function to pick correct value by frequency, flag ties
+pick_by_frequency <- function(val_in, val_out, freq_table, group_vars, field) {
+  if (val_in == val_out) return(list(correct = val_in, status = "agree"))
+  
+  freq_in <- freq_table %>%
+    filter(if_all(all_of(group_vars), ~ . == group_vars)) %>%
+    filter(.data[[field]] == val_in) %>%
+    pull(n) %>%
+    sum()
+  
+  freq_out <- freq_table %>%
+    filter(if_all(all_of(group_vars), ~ . == group_vars)) %>%
+    filter(.data[[field]] == val_out) %>%
+    pull(n) %>%
+    sum()
+  
+  if (freq_in > freq_out)       return(list(correct = val_in,  status = "in_wins"))
+  else if (freq_out > freq_in)  return(list(correct = val_out, status = "out_wins"))
+  else                          return(list(correct = NA,       status = "tie"))
+}
+
+# resolve correct value for each match
+corrections <- all_matches %>%
+  rowwise() %>%
+  mutate(
+    correct_value = case_when(
+      # tier 1 - resolve first name using last name + dob as group
+      tier == 1 ~ {
+        freq_in  <- first_name_freq %>%
+          filter(last_name == last_name_in, dob == dob_in, first_name == first_name_in) %>%
+          pull(n) %>% sum()
+        freq_out <- first_name_freq %>%
+          filter(last_name == last_name_in, dob == dob_in, first_name == first_name_out) %>%
+          pull(n) %>% sum()
+        if (first_name_in == first_name_out)   first_name_in
+        else if (freq_in >= freq_out)          first_name_in
+        else                                   first_name_out
+      },
+      
+      # tier 2 - resolve dob using first name + last name as group
+      tier == 2 ~ {
+        freq_in  <- dob_freq %>%
+          filter(first_name == first_name_in, last_name == last_name_in, dob == dob_in) %>%
+          pull(n) %>% sum()
+        freq_out <- dob_freq %>%
+          filter(first_name == first_name_in, last_name == last_name_in, dob == dob_out) %>%
+          pull(n) %>% sum()
+        if (as.character(dob_in) == as.character(dob_out))  as.character(dob_in)
+        else if (freq_in >= freq_out)                       as.character(dob_in)
+        else                                                as.character(dob_out)
+      },
+      
+      # tier 3 - resolve last name using first name + dob as group
+      tier == 3 ~ {
+        freq_in  <- last_name_freq %>%
+          filter(first_name == first_name_in, dob == dob_in, last_name == last_name_in) %>%
+          pull(n) %>% sum()
+        freq_out <- last_name_freq %>%
+          filter(first_name == first_name_in, dob == dob_in, last_name == last_name_out) %>%
+          pull(n) %>% sum()
+        if (last_name_in == last_name_out)   last_name_in
+        else if (freq_in >= freq_out)        last_name_in
+        else                                 last_name_out
+      }
+    ),
+    resolution = case_when(
+      tier == 1 ~ if_else(first_name_in == first_name_out, "agree",
+                  if_else(correct_value == first_name_in,  "in_wins", "out_wins")),
+      tier == 2 ~ if_else(as.character(dob_in) == as.character(dob_out), "agree",
+                  if_else(correct_value == as.character(dob_in), "in_wins", "out_wins")),
+      tier == 3 ~ if_else(last_name_in == last_name_out, "agree",
+                  if_else(correct_value == last_name_in,  "in_wins", "out_wins"))
+    )
+  ) %>%
+  ungroup()
+
+# check resolution summary
+corrections %>% count(tier, resolution)
+
+# flag any ties for manual review
+corrections %>%
+  filter(is.na(correct_value)) %>%
+  select(tier, id_in, id_out, first_name_in, first_name_out, last_name_in, last_name_out, dob_in, dob_out)
+```
+
+From this, we can tell that in typos, it was pretty equal on people mistyping their first and last names at check in and check out. DOB majority of people mistyped at checkout more (check in won at a higher frequency).
+*good table for report*
+
+Impute what side is correct 
+```{r}
+# impute tier 1 corrections - first name
+tier1_corrections <- corrections %>% filter(tier == 1)
+
+for (i in 1:nrow(tier1_corrections)) {
+  correct <- tier1_corrections$correct_value[i]
+  id_in_i  <- tier1_corrections$id_in[i]
+  id_out_i <- tier1_corrections$id_out[i]
+  
+  # fix data_in if it was wrong
+  data_in <- data_in %>%
+    mutate(first_name = case_when(
+      id_in == id_in_i ~ correct,
+      TRUE             ~ first_name
+    ))
+  
+  # fix data_out if it was wrong
+  data_out <- data_out %>%
+    mutate(first_name = case_when(
+      id_out == id_out_i ~ correct,
+      TRUE               ~ first_name
+    ))
+}
+
+# impute tier 2 corrections - dob
+tier2_corrections <- corrections %>% filter(tier == 2)
+
+for (i in 1:nrow(tier2_corrections)) {
+  correct  <- as.Date(tier2_corrections$correct_value[i])
+  id_in_i  <- tier2_corrections$id_in[i]
+  id_out_i <- tier2_corrections$id_out[i]
+  
+  data_in <- data_in %>%
+    mutate(dob = case_when(
+      id_in == id_in_i ~ correct,
+      TRUE             ~ dob
+    ))
+  
+  data_out <- data_out %>%
+    mutate(dob = case_when(
+      id_out == id_out_i ~ correct,
+      TRUE               ~ dob
+    ))
+}
+
+# impute tier 3 corrections - last name
+tier3_corrections <- corrections %>% filter(tier == 3)
+
+for (i in 1:nrow(tier3_corrections)) {
+  correct  <- tier3_corrections$correct_value[i]
+  id_in_i  <- tier3_corrections$id_in[i]
+  id_out_i <- tier3_corrections$id_out[i]
+  
+  data_in <- data_in %>%
+    mutate(last_name = case_when(
+      id_in == id_in_i ~ correct,
+      TRUE             ~ last_name
+    ))
+  
+  data_out <- data_out %>%
+    mutate(last_name = case_when(
+      id_out == id_out_i ~ correct,
+      TRUE               ~ last_name
+    ))
+}
+```
+
+Remerge and check NA
+```{r}
+merged <- data_in %>%
+  left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
+
+merged <- merged %>%
+  mutate(
+    note = case_when(
+      is.na(note.x) & is.na(note.y) ~ NA_character_,
+      is.na(note.x)                  ~ note.y,
+      is.na(note.y)                  ~ note.x,
+      TRUE                           ~ paste(note.x, note.y, sep = " | ")
+    )
+  ) %>%
+  select(-note.x, -note.y)
+
+merged <- merged %>%
+  mutate(duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")))
+
+nrow(merged)  # 3788 
+nrow(data_in) # 3788
+sum(is.na(merged$duration))  # 200
+```
+3788 people sucessfully checked in and out. 200 people checked in but did not check out (they are in merged with an empty check out). 104 people checked out but never in (they are not in merged because it is a left join)
+
+# IDs
+
+Assign new IDs to volunteers not in database and apply existing ID to volunteer records
+```{r}
+# get unique volunteers from merged
+unique_volunteers <- merged %>%
+  distinct(first_name, last_name, dob) %>%
+  arrange(last_name, first_name)
+
+# standardize database names to match merged formatting
+database <- database %>%
+  mutate(
+    first_name = str_to_lower(str_trim(first_name)),
+    last_name  = str_to_lower(str_trim(last_name))
+  )
+
+# join to database to pull existing IDs
+unique_volunteers <- unique_volunteers %>%
+  left_join(
+    database %>% select(first_name, last_name, ID),
+    by = c("first_name", "last_name")
+  )
+
+# check how many matched
+sum(!is.na(unique_volunteers$ID))  # found in database - 543
+sum(is.na(unique_volunteers$ID))   # need new ID
+
+# assign new sequential IDs to those not in database
+max_existing_id <- max(database$ID, na.rm = TRUE)
+
+unique_volunteers <- unique_volunteers %>%
+  mutate(
+    ID = case_when(
+      !is.na(ID) ~ ID,  # keep existing ID
+      TRUE        ~ max_existing_id + row_number()  # assign new sequential ID
+    )
+  )
+
+# verify no duplicate IDs
+unique_volunteers %>%
+  group_by(ID) %>%
+  filter(n() > 1)
+
+# join IDs back to merged
+merged <- merged %>%
+  left_join(
+    unique_volunteers %>% select(first_name, last_name, dob, ID),
+    by = c("first_name", "last_name", "dob")
+  )
+
+# verify everyone has an ID
+sum(is.na(merged$ID))  # should be 0
+```
+
+
+```{r}
+# flag potential same-name different-person cases
+unique_volunteers %>%
+  group_by(first_name, last_name) %>%
+  filter(n() > 1) %>%
+  arrange(last_name, first_name)
+```
+
