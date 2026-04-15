@@ -13,7 +13,7 @@ knitr::opts_chunk$set(echo = TRUE)
  Project: Manos Juntos STATCOM - Volunteer Check In/Out
  Script: volunteer_clean.R
  Author: Caroline Gheen
- Date: 2026-04-14
+ Date: 2026-03-01
  Purpose: Clean and prepare dataset for format in master dataset
 =============================================================================
 
@@ -21,10 +21,14 @@ knitr::opts_chunk$set(echo = TRUE)
 ## 2. Call in Data and Formatting
 ## 3. Fix DOB
 ## 4. Explore Data
-## 5. Merge Datasets
-## 6. Examine Duplicates
-## 8. Duration - Total Time Calculation
-## 9. Unique ID Assignment
+## 5. Merge Data
+## 6. Handle Duplicates
+## 7. Create Duration
+## 8. Create Notes Columns
+## 9. Fuzzy Matching
+## 10. Create IDs or Bring in From Database
+## 11. Flag Potential Same Name Cases
+## 12. Recommendations and Future Steps 
 
 
 ## 1. Packages
@@ -36,7 +40,7 @@ knitr::opts_chunk$set(echo = TRUE)
 # install.packages("writexl")
 ```
 
-# Call Packages
+Call packages
 ```{r}
 library(readxl) 
 library(dplyr) 
@@ -49,7 +53,6 @@ library(stringdist)
 
 
 ## 2. Call in Data and Formatting
-# Call in Data and Format
 Read in data, telling each column desired structure
 ```{r}
 data_in <- read_excel(
@@ -140,8 +143,7 @@ data_out <- data_out %>%
 )
 ```
 
-
-Load data
+Load database data
 ```{r}
 database <- read_excel("Volunteer_Database_2024.xlsx", col_types = c(
   "numeric", # ID
@@ -262,7 +264,6 @@ Goal is for nrow(data_in) == nrow(merged). using data_in as basis so matching al
 I wanted to try two ways to compare approaches, but only 19 people have an email in sign in... is this true??
 ```{r}
 sum(!is.na(data_in$email)) # 19 people do have an email
-sum(is.na(data_in$dob))  # 6 people do not have a dob - default
 ```
 
 Merge based on same email and date
@@ -308,7 +309,7 @@ When we merge based on first and last name, there is a warning that some first+l
 *Common Reasons to Have Duplicates on Check In: check in twice; check in instead of out; check in and did not check out*
 *Common Reasons to Have Duplicates on Check Out: people thought they were checking out and stayed longer so they checked out twice; checked out instead of in at the beginning; forgot to check in but checked out*
 
-# Duplicates 
+# 6. Handle Duplicates 
 starting at merged_name_dob chosen and named as merged
 ```{r, warning = FALSE}
 nrow(data_in) # 3805
@@ -321,6 +322,7 @@ nrow(merged) # 3818
 ```
 
 assign row id individually to data_in and data_out
+Done so when wanting to imput correct data, can specify row number instead of == specific data
 ```{r}
 data_in  <- data_in  %>% mutate(id_in  = row_number())
 data_out <- data_out %>% mutate(id_out = row_number())
@@ -446,7 +448,8 @@ data_out %>%
   group_by(first_name, last_name, date, dob) %>%
   filter(n() > 1)
 ```
-
+Re-check how data changed. 
+Merge changes back into merged data
 ```{r}
 # 1. did row counts change as expected?
 nrow(data_in)# 3788
@@ -468,8 +471,9 @@ left_join(data_out, by = c("date", "dob", "first_name", "last_name"))
 nrow(merged) # 3788
 nrow(data_in) #3788
 ```
-# Create Duration
-Ok, now there are no extra check in occurances. Make duration column and check how many NA
+
+# 7. Create Duration
+Ok, now there are no extra check in or out occurances. Make duration column and check how many NA
 ```{r}
 # calculate duration
 merged <- merged %>%
@@ -479,9 +483,9 @@ merged <- merged %>%
 sum(is.na(merged$duration)) #398 NA
 
 # and see what they look like
-merged %>%
-  filter(is.na(duration)) %>%
-  select(first_name, last_name, date, dob, timestamp_in, timestamp_out)
+#merged %>%
+  #filter(is.na(duration)) %>%
+  #select(first_name, last_name, date, dob, timestamp_in, timestamp_out)
 ```
 
 Clean id columns from rbind
@@ -513,7 +517,7 @@ truly_unmatched_in <- merged %>%
   filter(is.na(timestamp_out))
 nrow(truly_unmatched_in) #398
 ```
-# Create Notes Column 
+# 8. Create Notes Column 
 Clean data in of extra wording in either first name in or out and append to note column 
 ```{r}
 # initialize note column in data_in
@@ -610,7 +614,7 @@ nrow(merged)   # should equal nrow(data_in) = 3788
 Recalculate duration and check NA
 *15 people had extra writing in their first or last name boxes - this function does split genuine correctly spelled but has a space names as well.*
 *37 people have note entries now*
-*Future direction: individually audit 37 notes; determine strategy for name change.*
+*Future direction: individually audit 37 notes; determine strategy for name change and imputted the info they wanted to tell you (ex: I actually check in at 8am).*
 ```{r}
 merged <- merged %>%
   mutate(duration = as.numeric(difftime(timestamp_out, timestamp_in, units = "mins")))
@@ -618,7 +622,7 @@ merged <- merged %>%
 sum(is.na(merged$duration))  # 383
 ```
 
-# Fuzzy Matching 
+# 9. Fuzzy Matching 
 Rebuild fuzzy matching potential pools
 ```{r}
 # rebuild unmatched pools with clean data
@@ -637,6 +641,7 @@ nrow(unmatched_out)  # 287
 Fuzzy Matching
 First name typo - matches on last name, date and dob
 *17 people mistyped first name*
+*photo of table for report*
 ```{r}
 tier1_results <- list()
 
@@ -919,7 +924,12 @@ nrow(unmatched_in)   # should be 217 - 17 = 200
 nrow(unmatched_out)  # should be 121 - 17 = 104
 ```
 
-Determine which instances is right, by looking at frequency table of pair for each type of typo
+Determine which instances is right, by looking at *frequency table* of pair for each type of typo
+So, if the typo was a dob (aka tier 2 match), it looks at that combination first name and first name in data in and data out and determine if the check in or check out dob provided closer matches what is more frequently provided during checking in/out. This takes advantage of the fact that most volunteers come frequently and typos are rare relatively.
+*picture of frequency table - shows people are more commonly erring when checking out typing their dob and similar errors on check in and check out for first name and last.*
+*For first name: 11 people mistyped their check in, 8 mistyped their check out*
+*For dob: 36 people mistyped their check in, 111 mistyped their check out*
+*For last name: 7 people mistyped their check in, 10 mistyped their check out*
 ```{r}
 # combine all accepted matches
 all_matches <- bind_rows(
@@ -1040,9 +1050,6 @@ corrections %>%
   select(tier, id_in, id_out, first_name_in, first_name_out, last_name_in, last_name_out, dob_in, dob_out)
 ```
 
-From this, we can tell that in typos, it was pretty equal on people mistyping their first and last names at check in and check out. DOB majority of people mistyped at checkout more (check in won at a higher frequency).
-*good table for report*
-
 Impute what side is correct 
 ```{r}
 # impute tier 1 corrections - first name
@@ -1134,11 +1141,11 @@ nrow(merged)  # 3788
 nrow(data_in) # 3788
 sum(is.na(merged$duration))  # 200
 ```
-3788 people sucessfully checked in and out. 200 people checked in but did not check out (they are in merged with an empty check out). 104 people checked out but never in (they are not in merged because it is a left join)
+*3788 people sucessfully checked in and out. 200 people checked in but did not check out (they are in merged with an empty check out). 104 people checked out but never in (they are not in merged because it is a left join)*
 
-# IDs
-Because DOBs were so messed up, assign based on *distinct first and last name ONLY. This could cause issue because we cannot verify if someone is two different people but with same name except with domain knowledge.*
-*When was database collected vs when did checking in start? Did that many people really not come to volunteer or did it not capture soon enough after.*
+# 10. Create IDs or Bring in From Database
+Because DOBs were so messed up, assign based on *distinct first and last name ONLY.* This could cause issue because we cannot verify if someone is two different people but with same name except with domain knowledge.
+*When was database collected (2024) vs when did checking in start? Did that many people really not come to volunteer or did it not capture soon enough after.*
 ```{r}
 # by first and last name only
 merged %>%
@@ -1152,19 +1159,43 @@ merged %>%
 
 # how many total are in the database?
 nrow(database) #2999
-nrow(unique(database))
-dat
 
 # what date range does your check-in data cover?
 range(merged$date) # 1/28/2023 - 2/21/2026 
 ```
+*441 individuals (not exactly exact due to possible lingering typos or possible volunteers with same name) volunteered between January 2023-Feb 2026. *
+*Almost 3,000 people filled out the interested volunteer form at some point - I think it's odd this point is 2999 is it possible it's cut off?*
+
 
 Identify who is in database vs merged
+*about 80 people appear in database multiple times - or could be same named individuals *
+*53 people in database appeared in merged - signed up and came to volunteer.*
+*2857 people appear in database but never merged - never volunteered?*
+*388 people in merged but not database - new volunteers who never signed up*
 ```{r}
+# standardize database names to match merged formatting
+database <- database %>%
+  mutate(
+    first_name = str_to_lower(str_trim(first_name)),
+    last_name  = str_to_lower(str_trim(last_name))
+  )
+
+# how many people are in database multiple times
+database %>% 
+  distinct(first_name, last_name) %>% 
+  nrow() #2910 2999-2910 = 80
+
+# people in database and merged
+database %>%
+  inner_join(merged, by = c("first_name", "last_name")) %>%
+  distinct(first_name, last_name) %>%
+  nrow() #53
+
 # people in database who never appear in merged
 database %>%
   anti_join(merged, by = c("first_name", "last_name")) %>%
-  nrow() # 2943
+  distinct(first_name, last_name) %>%
+  nrow() # 2857
 
 # people in merged who are not in database (truly new volunteers)
 merged %>%
@@ -1173,7 +1204,6 @@ merged %>%
   nrow() #388
 ```
 
-
 Pull those in database with ID vs not
 ```{r}
 # get unique volunteers from merged - first and last name only
@@ -1181,26 +1211,23 @@ unique_volunteers <- merged %>%
   distinct(first_name, last_name) %>%
   arrange(last_name, first_name)
 
-# standardize database names to match merged formatting
-database <- database %>%
-  mutate(
-    first_name = str_to_lower(str_trim(first_name)),
-    last_name  = str_to_lower(str_trim(last_name))
-  )
+# get unique from data base
+database_unique <- database %>%
+  distinct(first_name, last_name, .keep_all = TRUE)
 
 # join to database to pull existing IDs
 unique_volunteers <- unique_volunteers %>%
   left_join(
-    database %>% select(first_name, last_name, ID),
+    database_unique %>% select(first_name, last_name, ID),
     by = c("first_name", "last_name")
   )
 
 # check how many matched
-sum(!is.na(unique_volunteers$ID))  # found in database
-sum(is.na(unique_volunteers$ID))   # need new ID
+sum(!is.na(unique_volunteers$ID))  # found in database - 53
+sum(is.na(unique_volunteers$ID))   # need new ID - 388
 ```
 
-Assign IDs to those not already in database
+Assign IDs to those not already in database. This picks up from the last ID assigned in database (although a lot of those volunteers are not using their id...)
 ```{r}
 # assign new sequential IDs to those not in database
 max_existing_id <- max(database$ID, na.rm = TRUE)
@@ -1216,7 +1243,7 @@ unique_volunteers <- unique_volunteers %>%
 # verify no duplicate IDs
 unique_volunteers %>%
   group_by(ID) %>%
-  filter(n() > 1)
+  filter(n() > 1) #0 - good
 ```
 
 Rejoin all to merged
@@ -1233,20 +1260,32 @@ sum(is.na(merged$ID))  # should be 0
 
 # verify row count still stable
 nrow(merged)  # should still be 3788
-nrow(unique(merged$first_name))
 
-# spot check - are names actually comparable?
-head(database %>% select(first_name, last_name))
-head(unique_volunteers %>% select(first_name, last_name))
+# look at merged to see ids
+head(merged)
 ```
 
-# flag potential same name cases with  
+# 11. Flag Potential Same Name Cases  
 ```{r}
 # flag potential same-name different-person cases
 unique_volunteers %>%
   group_by(first_name, last_name) %>%
   filter(n() > 1) %>%
   arrange(last_name, first_name)
-```
 
-*Recommendation: tell everyone their ID number and have them enter it when signing in; add guardrails to DOB so someone cannot put an age under 18 years old (mitigate people putting todays date). Communicate to use same name - full not nickname or nickname only overall, but especially on same day check in check out. Require email when submitting document - allows robust ground truth robust to mistypes. *
+range(na.omit(merged$duration))
+```
+Showing nobody has the same name - does this align with what the volunteer coordinators know?
+
+# 12. Recommendation and Future Directions
+Recommendations: 
+*1. tell everyone their ID number and have them enter it when signing in - will likley want to do a bit more robust cleaning prior to assigning out what we made today*
+*2.add guardrails to DOB so someone cannot put an age under 18 years old (mitigate people putting todays date).* 
+*3. Communicate to use same name - full not nickname or nickname only overall, but especially on same day check in check out.*
+*4. Require email when submitting document - allows robust ground truth robust to mistypes.* 
+
+Future Directions:
+*1. Clean phone numbers are they may offer a more robust ground truth than dob*
+*2. There are still 200 people with a check in and no check out and 104 people with a check out and no check in. Assume they did not check in or out and manually imput decided upon check in and check out times for these so we can get a duration for them.*
+*3. Explore duration time more - there will likely be some manual cleaning as the range currently goes negative now.*
+*4. Explore what people entered in notes column and determine how you want to handle changing names - stable IDs would help with this.*
